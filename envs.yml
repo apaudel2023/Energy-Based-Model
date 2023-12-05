@@ -1,0 +1,18 @@
+name: my_env  # You can change "my_env" to your preferred environment name
+channels:
+  - pytorch
+  - defaults
+dependencies:
+  - python  # You can change the Python version if needed
+  - pytorch
+  - torchvision
+  - numpy
+  - matplotlib
+  - pillow
+  - seaborn
+  - scikit-learn
+  - pip
+  - pip:
+    - torchsummary
+
+# conda env update -n env-name -f environment.yml --prune
