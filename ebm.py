@@ -3,6 +3,8 @@ import torch.nn as nn
 from sampler import Sampler
 import pytorch_lightning as pl
 import torch.optim as optim
+import pdb
+
 
 class Swish(nn.Module):
 
@@ -35,9 +37,12 @@ class CNNModel(nn.Module):
                 nn.Linear(c_hid3, out_dim)
         )
 
+
     def forward(self, x):
         x = self.cnn_layers(x).squeeze(dim=-1)
         return x
+    
+
 
 class DeepEnergyModel(pl.LightningModule):
 

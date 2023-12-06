@@ -1,13 +1,10 @@
 import torch
 import torchvision
-
 import pytorch_lightning as pl
-
-# from torchvision.datasets import MNIST
-# from torchvision import transforms
 import random 
 
-from callbacks import SamplerCallback as Sampler
+from sampler import Sampler
+
 
 class GenerateCallback(pl.Callback):
 
@@ -40,7 +37,6 @@ class GenerateCallback(pl.Callback):
         pl_module.train()
         return imgs_per_step
     
-
 class SamplerCallback(pl.Callback):
 
     def __init__(self, num_imgs=32, every_n_epochs=5):

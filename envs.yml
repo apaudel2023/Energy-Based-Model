@@ -14,5 +14,9 @@ dependencies:
   - pip
   - pip:
     - torchsummary
+    - imageio
+    - tqdm
+    - lightning # pytorch lightning
+
 
 # conda env update -n env-name -f environment.yml --prune

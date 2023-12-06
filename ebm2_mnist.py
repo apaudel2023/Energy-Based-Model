@@ -3,42 +3,46 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
-from sklearn.datasets import load_digits
-from sklearn import datasets
+# from sklearn.datasets import load_digits
+# from sklearn import datasets
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as tt
+from torchvision.datasets import MNIST
+from torchsummary import summary
+
 
 import pdb
 
 
-class Digits(Dataset):
-    """Scikit-Learn Digits dataset."""
-
+class MNISTDataset(Dataset):
     def __init__(self, mode='train', transforms=None):
-        digits = load_digits()
+        mnist_dataset = MNIST(root='./data', train=(mode == 'train'), download=True, transform=None)
+        
         if mode == 'train':
-            self.data = digits.data[:1000].astype(np.float32)
-            self.targets = digits.target[:1000]
+            self.data = mnist_dataset.data[:1000].float() / 255.0  # Normalize to [0, 1]
+            self.targets = mnist_dataset.targets[:1000]
         elif mode == 'val':
-            self.data = digits.data[1000:1350].astype(np.float32)
-            self.targets = digits.target[1000:1350]
+            self.data = mnist_dataset.data[1000:1200].float() / 255.0
+            self.targets = mnist_dataset.targets[1000:1200]
         else:
-            self.data = digits.data[1350:].astype(np.float32)
-            self.targets = digits.target[1350:]
-
+            self.data = mnist_dataset.data[1200:1300].float() / 255.0
+            self.targets = mnist_dataset.targets[1200:1300]
+        
         self.transforms = transforms
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        sample_x = self.data[idx]
+        sample_x = self.data[idx].view(-1)  # Flatten to a 1D tensor
         sample_y = self.targets[idx]
+        
         if self.transforms:
             sample_x = self.transforms(sample_x)
-        return (sample_x, sample_y)
+        
+        return sample_x, sample_y
     
 class EBM(nn.Module):
     def __init__(self, energy_net, alpha, sigma, ld_steps, D):
@@ -60,6 +64,7 @@ class EBM(nn.Module):
 
     def classify(self, x):
         f_xy = self.energy_net(x)
+        # pdb.set_trace()
         y_pred = torch.softmax(f_xy, 1)
         return torch.argmax(y_pred, dim=1)
 
@@ -129,7 +134,8 @@ class EBM(nn.Module):
     def sample(self, batch_size=64, x=None):
         # - 1) Sample from uniform
         x_sample = 2. * torch.rand([batch_size, self.D]) - 1.
-
+        # Sample from Gaussian distribution
+        # x_sample = torch.randn([batch_size, self.D])
         # - 2) run Langevine Dynamics
         for i in range(self.ld_steps):
             x_sample = self.langevine_dynamics_step(x_sample, alpha=self.alpha)
@@ -148,11 +154,14 @@ def evaluation(test_loader, name=None, model_best=None, epoch=None):
     loss_gen = 0.
     N = 0.
     for indx_batch, (test_batch, test_targets) in enumerate(test_loader):
+        # pdb.set_trace()
         # hybrid loss
         loss_t = model_best.forward(test_batch, test_targets, reduction='sum')
         loss = loss + loss_t.item()
         # classification error
+        # pdb.set_trace()
         y_pred = model_best.classify(test_batch)
+
         e = 1.*(y_pred == test_targets)
         loss_error = loss_error + (1. - e).sum().item()
         # generative nll
@@ -181,11 +190,11 @@ def samples_real(name, test_loader):
 
     fig, ax = plt.subplots(num_x, num_y)
     for i, ax in enumerate(ax.flatten()):
-        plottable_image = np.reshape(x[i], (8, 8))
+        plottable_image = np.reshape(x[i], (28, 28))
         ax.imshow(plottable_image, cmap='gray')
         ax.axis('off')
 
-    plt.savefig(name+'_real_images.pdf', bbox_inches='tight')
+    plt.savefig(name+'_real_images.png', bbox_inches='tight')
     plt.close()
 
 
@@ -201,15 +210,15 @@ def samples_generated(name, data_loader, extra_name=''):
 
     fig, ax = plt.subplots(num_x, num_y)
     for i, ax in enumerate(ax.flatten()):
-        plottable_image = np.reshape(x[i], (8, 8))
+        plottable_image = np.reshape(x[i], (28, 28))
         ax.imshow(plottable_image, cmap='gray')
         ax.axis('off')
 
-    plt.savefig(name + '_generated_images' + extra_name + '.pdf', bbox_inches='tight')
+    plt.savefig(name + '_generated_images' + extra_name + '.png', bbox_inches='tight')
     plt.close()
 
 
-def plot_curve(name, nll_val, file_name='_nll_val_curve.pdf', color='b-'):
+def plot_curve(name, nll_val, file_name='_nll_val_curve.png', color='b-'):
     plt.plot(np.arange(len(nll_val)), nll_val, color, linewidth='3')
     plt.xlabel('epochs')
     plt.ylabel('nll')
@@ -223,6 +232,7 @@ def training(name, max_patience, num_epochs, model, optimizer, training_loader, 
     best_nll = 1000.
     patience = 0
 
+    # pdb.set_trace()
     # Main loop
     for e in range(num_epochs):
         # TRAINING
@@ -264,48 +274,56 @@ def training(name, max_patience, num_epochs, model, optimizer, training_loader, 
     # gen_val = np.asarray(gen_val)
     # Assuming gen_val is a list of PyTorch tensors
     gen_val = [tensor.detach().cpu().numpy() for tensor in gen_val]
-
-# Now, gen_val_numpy is a list of NumPy arrays
-
-
+    # Now, gen_val_numpy is a list of NumPy arrays
     return nll_val, error_val, gen_val
 
-transforms_train = tt.Compose( [tt.Lambda(lambda x: 2. * (x / 17.) - 1.),
-                              tt.Lambda(lambda x: torch.from_numpy(x)),
-                              tt.Lambda(lambda x: x + 0.03 * torch.randn_like(x))
-                              ])
+# Define a custom transform
+class MNISTCustomTransform:
+    def __init__(self, add_noise=True):
+        self.add_noise = add_noise
 
-transforms_val  = tt.Compose( [tt.Lambda(lambda x: 2. * (x / 17.) - 1.),
-                               tt.Lambda(lambda x: torch.from_numpy(x)),
-                               ])
+    def __call__(self, x):
+        # Normalize to the range [-1, 1] # Convert to PyTorch tensor # Add random noise during training
 
-train_data = Digits(mode='train', transforms=transforms_train)
-val_data = Digits(mode='val', transforms=transforms_val)
-test_data = Digits(mode='test', transforms=transforms_val)
+        x = 2. * (x / 255.) - 1.
+        if self.add_noise:
+            x = x + 0.03 * torch.randn_like(x)
+        
+        return x
+    
+# Create a Compose transform with multiple operations for training
+transforms_train = tt.Compose([
+    MNISTCustomTransform(add_noise=True)
+    ])
 
+# Create a Compose transform with multiple operations for validation (no noise)
+transforms_val = tt.Compose([
+    MNISTCustomTransform(add_noise=False)
+    ])
+
+train_data = MNISTDataset(mode='train', transforms=transforms_train)
+val_data = MNISTDataset(mode='val', transforms=transforms_val)
+test_data = MNISTDataset(mode='test', transforms=transforms_val)
+
+# pdb.set_trace()
 training_loader = DataLoader(train_data, batch_size=64, shuffle=True)
 val_loader = DataLoader(val_data, batch_size=64, shuffle=False)
 test_loader = DataLoader(test_data, batch_size=64, shuffle=False)
 
 # pdb.set_trace()
 
-num_batches = len(training_loader)
-sample_batch = next(iter(training_loader))
-sample_shape = sample_batch[0].shape
-print(f'train data shape: {sample_shape}')
+D = 28 * 28  # Input dimension for MNIST images
+K = 10  # Output dimension for 10 classes
+# M = 512  # The number of neurons
 
-D = 64  # input dimension
-K = 10 # output dimension
-M = 512  # the number of neurons
+sigma = 0.05  # The noise level
+alpha = 1000  # The step-size for SGLD
+ld_steps = 60  # The number of steps of SGLD
 
-sigma = 0.01 # the noise level
+lr = 1e-3  # Learning rate
+num_epochs = 200  # Max. number of epochs
+max_patience = 10  # Early stopping patience
 
-alpha = 1.  # the step-size for SGLD
-ld_steps = 20  # the number of steps of SGLD
-
-lr = 1e-5  # learning rate
-num_epochs = 500  # max. number of epochs
-max_patience = 10  # an early stopping is used, if training doesn't improve for longer than 20 epochs, it is stopped
 
 name = 'ebm' + '_' + str(alpha) + '_' + str(sigma) + '_' + str(ld_steps)
 result_dir = './../results/' + name + '/'
@@ -313,21 +331,66 @@ if not (os.path.exists(result_dir)):
     os.makedirs(result_dir, exist_ok=True)
 
 
-energy_net = nn.Sequential(nn.Linear(D, M), nn.ReLU(),
-                               nn.Linear(M, M), nn.ReLU(),
-                               nn.Linear(M, M), nn.ReLU(),
-                               nn.Linear(M, K))
+
+class EnergyNet(nn.Module):
+    def __init__(self, input_channels, output_classes):
+        super(EnergyNet, self).__init__()
+
+        # Convolutional layers
+        self.conv1 = nn.Conv2d(in_channels=input_channels, out_channels=32, kernel_size=3, stride=2, padding=1)
+        self.relu1 = nn.ReLU()
+
+        # Flatten layer
+        self.flatten = nn.Flatten()
+
+        # Fully connected layers
+        self.fc1 = nn.Linear(32 * 14 * 14, 512)  # Adjust the input size based on your actual input dimensions
+        self.relu3 = nn.ReLU()
+        self.fc2 = nn.Linear(512, 256)
+        self.relu4 = nn.ReLU()
+
+        # Output layer
+        self.fc_out = nn.Linear(256, output_classes)
+
+    def forward(self, x):
+        x = x.view(-1, 1, 28, 28)
+        x = self.conv1(x)
+        x = self.relu1(x)
+        x = self.flatten(x)
+        x = self.fc1(x)
+        x = self.relu3(x)
+        x = self.fc2(x)
+        x = self.relu4(x)
+        x = self.fc_out(x)
+        return x
+
+
+
+# energy_net = nn.Sequential(nn.Linear(D, M), nn.ReLU(),
+#                                nn.Linear(M, M), nn.ReLU(),
+#                                nn.Linear(M, M), nn.ReLU(),
+#                                nn.Linear(M, K))
+
+# Example usage
+input_channels = 1  # For grayscale images, set to 1. For RGB images, set to 3.
+output_classes = 10  # Assuming 10 classes for MNIST
+energy_net = EnergyNet(input_channels, output_classes)
 
 # We initialize the full model
 model = EBM(energy_net, alpha=alpha, sigma=sigma, ld_steps=ld_steps, D=D)
 
+# Print the model summary
+# summary(model, (D,))
+
+# pdb.set_trace()
 # OPTIMIZER
 optimizer = torch.optim.Adamax([p for p in model.parameters() if p.requires_grad == True], lr=lr)
 
-# Training procedure
 nll_val, error_val, gen_val = training(name=result_dir + name, max_patience=max_patience, num_epochs=num_epochs,
                                        model=model, optimizer=optimizer,
                                        training_loader=training_loader, val_loader=val_loader)
+
+
 
 test_loss, test_error, test_gen = evaluation(name=result_dir + name, test_loader=test_loader)
 f = open(result_dir + name + '_test_loss.txt', "w")
@@ -338,5 +401,5 @@ samples_real(result_dir + name, test_loader)
 samples_generated(result_dir + name, test_loader)
 
 plot_curve(result_dir + name, nll_val)
-plot_curve(result_dir + name, error_val, file_name='_ca_val_curve.pdf', color='r-')
-plot_curve(result_dir + name, gen_val, file_name='_gen_val_curve.pdf', color='g-')
+plot_curve(result_dir + name, error_val, file_name='_ca_val_curve.png', color='r-')
+plot_curve(result_dir + name, gen_val, file_name='_gen_val_curve.png', color='g-')
