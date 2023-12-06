@@ -5,12 +5,14 @@ import math
 import numpy as np
 import random
 import pdb
+
 ## Imports for plotting
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
 plt.rcParams['lines.linewidth'] = 2.0
 plt.rcParams['savefig.format'] = 'png'
 # plt.rcParams['savefig.transparent'] = True
+from PIL import Image
 
 import seaborn as sns
 sns.reset_orig()
@@ -20,15 +22,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data as data
+from torch.utils.data import Dataset
 import torch.optim as optim
 
 # Torchvision
 import torchvision
 from torchvision.datasets import MNIST
 from torchvision import transforms
+
 # PyTorch Lightning
 import pytorch_lightning as pl
-
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 
 # Path to the folder where the datasets are/should be downloaded (e.g. CIFAR10)
@@ -46,22 +49,50 @@ torch.backends.cudnn.benchmark = False
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 print("Device:", device)
 
-# Transformations applied on each image => make them a tensor and normalize between -1 and 1
-transform = transforms.Compose([transforms.ToTensor(),
-                                transforms.Normalize((0.5,), (0.5,))
-                               ])
+# ===========================
+import torch
+from torch.utils.data import Dataset
+import numpy as np
 
-# Loading the training dataset. We need to split it into a training and validation part
-train_set = MNIST(root=DATASET_PATH, train=True, transform=transform, download=True)
-# pdb.set_trace()
-# Loading the test set
-test_set = MNIST(root=DATASET_PATH, train=False, transform=transform, download=True)
+import torch
+from torch.utils.data import Dataset
+import numpy as np
 
-# We define a set of data loaders that we can use for various purposes later.
-# Note that for actually training a model, we will use different data loaders
-# with a lower batch size.
-train_loader = data.DataLoader(train_set, batch_size=32, shuffle=True,  drop_last=True, pin_memory=True)
-test_loader  = data.DataLoader(test_set,  batch_size=64, shuffle=False, drop_last=False)
+import torch
+from torch.utils.data import Dataset
+import numpy as np
+
+class SpiralDataset(Dataset):
+    def __init__(self, num_samples=1000):
+        theta = np.linspace(0, 5 * np.pi, num_samples)
+        radius = theta
+        x = radius * np.cos(theta)
+        y = radius * np.sin(theta)
+        data = np.vstack((x, y)).T
+
+        # Scale the entire dataset between -1 and 1
+        data_min, data_max = data.min(axis=0), data.max(axis=0)
+        data_scaled = 2 * (data - data_min) / (data_max - data_min) - 1
+        self.data = torch.from_numpy(data_scaled).float()
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        sample = self.data[idx]
+        return sample, 0  
+
+# Create a synthetic spiral dataset
+spiral_dataset = SpiralDataset(num_samples=5000)
+
+# Split the dataset into training and validation sets
+train_size = int(0.8 * len(spiral_dataset))
+val_size = len(spiral_dataset) - train_size
+train_dataset, val_dataset = torch.utils.data.random_split(spiral_dataset, [train_size, val_size])
+
+# Define data loaders
+train_loader = data.DataLoader(train_dataset, batch_size=128, shuffle=True, drop_last=True, pin_memory=True)
+val_loader = data.DataLoader(val_dataset, batch_size=128, shuffle=False, drop_last=False)
 
 # ==========================================
 class Swish(nn.Module):
@@ -98,6 +129,24 @@ class CNNModel(nn.Module):
     def forward(self, x):
         x = self.cnn_layers(x).squeeze(dim=-1)
         return x
+
+class PointModel(nn.Module):
+    def __init__(self, input_dim=2, hidden_features=32, out_dim=1):
+        super(PointModel, self).__init__()
+        self.fc_layers = nn.Sequential(
+            nn.Linear(input_dim, hidden_features*4),
+            nn.ReLU(),
+            nn.Linear(hidden_features*4, hidden_features*2),
+            nn.ReLU(),
+            nn.Linear(hidden_features*2, hidden_features ),
+            nn.ReLU(),
+            nn.Linear(hidden_features , hidden_features // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_features // 2, out_dim)
+        )
+
+    def forward(self, x):
+        return self.fc_layers(x)
     
 # ==============================================
 class Sampler:
@@ -117,7 +166,7 @@ class Sampler:
         self.max_len = max_len
         self.examples = [(torch.rand((1,)+img_shape)*2-1) for _ in range(self.sample_size)]
 
-    def sample_new_exmps(self, steps=60, step_size=10):
+    def sample_new_exmps(self, steps=60, step_size=1):
         """
         Function for getting a new batch of "fake" images.
         Inputs:
@@ -171,7 +220,7 @@ class Sampler:
         # Loop over K (steps)
         for _ in range(steps):
             # Part 1: Add noise to the input.
-            noise.normal_(0, 0.005)
+            noise.normal_(0, 0.01)
             inp_imgs.data.add_(noise.data)
             inp_imgs.data.clamp_(min=-1.0, max=1.0)
 
@@ -209,7 +258,9 @@ class DeepEnergyModel(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        self.cnn = CNNModel(**CNN_args)
+        # self.nn = CNNModel(**CNN_args)
+        self.cnn = PointModel(**CNN_args)
+
         self.sampler = Sampler(self.cnn, img_shape=img_shape, sample_size=batch_size)
         self.example_input_array = torch.zeros(1, *img_shape)
 
@@ -311,48 +362,31 @@ class SamplerCallback(pl.Callback):
             grid = torchvision.utils.make_grid(exmp_imgs, nrow=4, normalize=True, range=(-1,1))
             trainer.logger.experiment.add_image("sampler", grid, global_step=trainer.current_epoch)
 
-# ============================================
-class OutlierCallback(pl.Callback):
-
-    def __init__(self, batch_size=1024):
-        super().__init__()
-        self.batch_size = batch_size
-
-    def on_epoch_end(self, trainer, pl_module):
-        with torch.no_grad():
-            pl_module.eval()
-            rand_imgs = torch.rand((self.batch_size,) + pl_module.hparams["img_shape"]).to(pl_module.device)
-            rand_imgs = rand_imgs * 2 - 1.0
-            rand_out = pl_module.cnn(rand_imgs).mean()
-            pl_module.train()
-
-        trainer.logger.experiment.add_scalar("rand_out", rand_out, global_step=trainer.current_epoch)
-
+# =========================================
 # =========================================
 def train_model(**kwargs):
     # Create a PyTorch Lightning trainer with the generation callback
     trainer = pl.Trainer(default_root_dir=os.path.join(CHECKPOINT_PATH, "MNIST"),
                          accelerator="gpu" if str(device).startswith("cuda") else "cpu",
                          devices=1,
-                         max_epochs=20,
+                         max_epochs=100,
                          gradient_clip_val=0.1,
                          callbacks=[ModelCheckpoint(save_weights_only=True, mode="min", monitor='val_contrastive_divergence'),
                                     GenerateCallback(every_n_epochs=5),
                                     SamplerCallback(every_n_epochs=5),
-                                    OutlierCallback(),
                                     LearningRateMonitor("epoch")
                                    ])
 
     pl.seed_everything(42)
     model = DeepEnergyModel(**kwargs)
-    trainer.fit(model, train_loader, test_loader)
-    model = DeepEnergyModel.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
+    trainer.fit(model, train_loader, val_loader)
+    # model = DeepEnergyModel.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
     
     return model
 
 if __name__ == '__main__':
     # Rest of your code
-    model = train_model(img_shape=(1,28,28),
+    model = train_model(img_shape=(2,),
                         batch_size=train_loader.batch_size,
                         lr=1e-4,
                         beta1=0.0)
@@ -363,21 +397,47 @@ if __name__ == '__main__':
     # pdb.set_trace()
     model.to(device)
     pl.seed_everything(43)
-    callback = GenerateCallback(batch_size=8, vis_steps=8, num_steps=256)
+    vis_step = 2
+    callback = GenerateCallback(batch_size=500, vis_steps=vis_step, num_steps=50)
     imgs_per_step = callback.generate_imgs(model)
     imgs_per_step = imgs_per_step.cpu()
 
-    for i in range(imgs_per_step.shape[1]):
-        step_size = callback.num_steps // callback.vis_steps
-        imgs_to_plot = imgs_per_step[step_size-1::step_size,i]
-        imgs_to_plot = torch.cat([imgs_per_step[0:1,i],imgs_to_plot], dim=0)
-        grid = torchvision.utils.make_grid(imgs_to_plot, nrow=imgs_to_plot.shape[0], normalize=True, value_range=(-1,1), pad_value=0.5, padding=2)
-        grid = grid.permute(1, 2, 0) # (C, H, W), to (H, W, C)
-        plt.figure(figsize=(8,8))
-        plt.imshow(grid)
-        plt.xlabel("Generation iteration")
-        plt.xticks([(imgs_per_step.shape[-1]+2)*(0.5+j) for j in range(callback.vis_steps+1)],
-                labels=[1] + list(range(step_size,imgs_per_step.shape[0]+1,step_size)))
-        plt.yticks([])
-        plt.savefig(f'./../saved_models/generated_{i+1}.png', bbox_inches='tight')
+    # Assuming you have a validation dataset with 2D points
+    real_data, _ = next(iter(val_loader))  # Replace with your validation dataset
+
+    # pdb.set_trace()
+    # Plotting
+    result_loc = "./../spiral_results/generated_images"
+    os.makedirs(result_loc, exist_ok=True)
+    
+    gif_images = []
+    for i in range(imgs_per_step.shape[0]//vis_step):
+        index = i * vis_step
+        imgs_to_plot = imgs_per_step[index]
+        # imgs_to_plot = torch.cat([imgs_per_step[0:1, i], imgs_to_plot], dim=0)
+        
+        # pdb.set_trace()
+
+        plt.scatter(real_data[:, 0], real_data[:, 1], color='blue', label='Real Data', alpha=0.5)
+        plt.scatter(imgs_to_plot[:, 0], imgs_to_plot[:, 1], color='red', label='Generated Data', alpha=0.5)
+        plt.xlabel("X-axis")
+        plt.ylabel("Y-axis")
+        plt.legend()
+        plt.title(f"Step Size: {index+1}")
+        plt.savefig(f'{result_loc}/generated_{i+1}.png', bbox_inches='tight')
         plt.close()
+        
+        img_path = f'{result_loc}/generated_{i + 1}.png'
+        gif_images.append(Image.open(img_path))
+    # Create a GIF        
+
+    # Save the GIF
+    gif_path = f'{result_loc}/GIF_GENERATED.gif'
+    gif_images[0].save(
+        gif_path,
+        save_all=True,
+        append_images=gif_images[1:],
+        duration=500,  # Duration between frames in milliseconds
+        loop=1,  # 0 for an infinite loop, other values for a finite loop
+    )
+    print(f"GIF saved at: {gif_path}")
